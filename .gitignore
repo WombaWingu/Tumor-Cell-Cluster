@@ -1,0 +1,6 @@
+﻿*.czi
+*.pth
+*.png
+Time_Log.txt
+.venv/
+__pycache__/
