@@ -132,6 +132,7 @@ class UNET(nn.Module):
 
 stack_slice = {}
 stack_mask = {}
+stack_z = {}
 
 for n in CZI_PATH:
     czi = czifile.CziFile(n)
@@ -150,6 +151,7 @@ for n in CZI_PATH:
     ratios         = [] 
     stack_slice[n] = []
     stack_mask[n] = []
+    stack_z[n] = []
 
 
     for z in range(n_slices):
@@ -159,6 +161,7 @@ for n in CZI_PATH:
         if mask is not None:
             stack_slice[n].append(combined)
             stack_mask[n].append(mask)
+            stack_z[n].append(z)
 
         f  = count_cells(fitc[z])
         h  = count_cells(hoechst[z])
@@ -220,7 +223,7 @@ val_dataset = SpheroidDataSet(valSL, valMA)
 val_loader = DataLoader(val_dataset, batch_size= 8, shuffle= False)
 
 
-MODE = "train"
+MODE = "view"
 
 print(datetime.now())
 
@@ -230,7 +233,7 @@ with open("Time_Log.txt", "a") as f:
 if MODE == "train":
     best_val = float('inf')
 
-    for epoch in range(100):
+    for epoch in range(120):
 
         start = time.time()
         model.train()
@@ -313,6 +316,27 @@ elif MODE == "test":
 
     print(f"Test loss: {np.mean(test_losses):.4f}")
 
+if MODE == "checkbest":
+    model.load_state_dict(torch.load('best_model.pth', map_location=device))
+    model.eval()
+
+    val_losses, val_dice = [], []
+    with torch.no_grad():
+        for images, masks in val_loader:
+            images = images.float().unsqueeze(1).to(device)
+            masks = masks.float().unsqueeze(1).to(device)
+            preds = torch.sigmoid(model(images))
+            val_losses.append(loss_func(preds, masks).item())
+
+            hard = (preds > 0.5).float()
+            inter = (hard * masks).sum(dim = (1,2,3))
+            denom = hard.sum(dim = (1,2,3)) + masks.sum(dim = (1,2,3))
+            val_dice.extend(((2 * inter + 1e-6) /  (denom + 1e-6)).cpu().tolist())
+
+    val_dice = np.array(val_dice)
+    print(f"Best model -> Val loss: {np.mean(val_losses):.4f}, Test Dice: mean {val_dice.mean():.3f}, median {np.median(val_dice):.3f}, min {val_dice.min():.3f}")
+    np.save("val_dice_best.npy", val_dice)
+
 torch.save(model.state_dict(), "model.pth")
 
 if MODE == "augcheck":
@@ -332,7 +356,7 @@ if MODE == "view":
 
     val_dataset = SpheroidDataSet(valSL, valMA)
 
-    for idx in [0]:
+    for idx in [56,59,63,64,76]:
         image, mask = val_dataset[idx]
         x = torch.tensor(image, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
 
@@ -349,6 +373,42 @@ if MODE == "view":
         plt.savefig(f"val_view_{idx}.png")
         plt.close()
 
+if MODE == "view_dice":
+    val_dice = np.load("val_dice_best.npy")
+    val_stacks = ["107_Scan.czi", "81_Scan.czi"]
+
+    sizes = [len(stack_z[s]) for s in val_stacks]
+    assert sum(sizes) == len(val_dice), "Dice count doesn't match val slices"
+
+    fig, axes = plt.subplots(2, 1, figsize=(10, 7))
+    start = 0
+    rows = []
+    for ax, s, size in zip(axes, val_stacks, sizes):
+        d = val_dice[start:start + size]
+        z = stack_z[s]
+        cov = [m.mean() for m in stack_mask[s]]
+
+        ax.plot(z, d, "o-", ms=3, color="tab:blue")
+        ax.set_ylim(0, 1.02)
+        ax.set_ylabel("Dice", color="tab:blue")
+        ax.set_xlabel("z-slice")
+        ax.set_title(s)
+
+        ax2 = ax.twinx()
+        ax2.plot(z, cov, color="gray", alpha=0.5)
+        ax2.set_ylabel("Mask coverage", color="gray")
+
+        for i in range(size):
+            rows.append((d[i], s, z[i], cov[i], start + i))
+        start += size
+
+    plt.tight_layout()
+    plt.savefig("val_dice_by_slice.png", dpi=150)
+    plt.close()
+
+    print("Worst 10 val slices:")
+    for dice, s, z, cov, idx in sorted(rows)[:10]:
+        print(f"  {s} z={z:3d}  Dice={dice:.3f}  coverage={cov:.3f}  val_idx={idx}")
 
 print("")
 print(datetime.now())
