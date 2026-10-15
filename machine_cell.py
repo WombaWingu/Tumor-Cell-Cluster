@@ -222,7 +222,7 @@ val_dataset = SpheroidDataSet(valSL, valMA)
 val_loader = DataLoader(val_dataset, batch_size= 8, shuffle= False)
 
 
-MODE = "view"
+MODE = "view"  # "train", "test", "checkbest", "view", "view_dice", "augcheck "
 
 print(datetime.now())
 
@@ -306,6 +306,7 @@ elif MODE == "test":
     test_loader = DataLoader(test_dataset, batch_size= 8 , shuffle = False)
 
     test_losses = []
+    test_dice = []
     with torch.no_grad():
         for images, masks in test_loader:
             images = images.float().unsqueeze(1).to(device)
@@ -313,7 +314,17 @@ elif MODE == "test":
             prediction = torch.sigmoid(model(images))
             test_losses.append(loss_func(prediction, masks).item())
 
+            hard = (prediction > 0.5).float()
+            intersec = (hard * masks).sum(dim = (1,2,3))
+            denom = hard.sum(dim = (1,2,3)) + masks.sum(dim = (1,2,3))
+            d = (2 * intersec + 1e-6) / (denom + 1e-6)
+            test_dice.extend(d.cpu().tolist())
+
+    test_dice = np.array(test_dice)
+    np.save("test_dice.npy", test_dice)
+
     print(f"Test loss: {np.mean(test_losses):.4f}")
+    print(f"Test Dice: mean {np.mean(test_dice):.3f}, median {np.median(test_dice):.3f}, min {np.min(test_dice):.3f}")
 
 if MODE == "checkbest":
     model.load_state_dict(torch.load('best_model.pth', map_location=device))
@@ -354,9 +365,10 @@ if MODE == "view":
     model.eval()
 
     val_dataset = SpheroidDataSet(valSL, valMA)
+    test_dataset = SpheroidDataSet(testSL, testMA)
 
-    for idx in [56,59,63,64,76]:
-        image, mask = val_dataset[idx]
+    for idx in [91,88,92,87,89,93,90,94,86,95]:
+        image, mask = test_dataset[idx]
         x = torch.tensor(image, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
 
         with torch.no_grad():
@@ -373,11 +385,13 @@ if MODE == "view":
         plt.close()
 
 if MODE == "view_dice":
-    val_dice = np.load("val_dice_best.npy")
-    val_stacks = ["107_Scan.czi", "81_Scan.czi"]
+    val_dice = np.load("test_dice.npy")
+    val_stacks = ["127_Scan.czi", "74_Scan.czi"]
+    print(len(np.load("test_dice.npy")))
+    plt.savefig("test_dice_by_slice.png", dpi=150)
 
     sizes = [len(stack_z[s]) for s in val_stacks]
-    assert sum(sizes) == len(val_dice), "Dice count doesn't match val slices"
+    assert sum(sizes) == len(val_dice), f"stacks have {sum(sizes)} slices {sizes}, file has {len(val_dice)} scores"
 
     fig, axes = plt.subplots(2, 1, figsize=(10, 7))
     start = 0
