@@ -29,6 +29,30 @@ def count_cells(ch_slice):
         return None
     return len(regionprops(label(mask)))    
 
+def czi_scalingUm(path):
+    import xml.etree.ElementTree as ET
+
+    try:
+        root = ET.fromstringlist(czifile.CziFile(path).metadata())
+        vals = {}
+        for x in root.iter("Distance"):
+            v = x.find("Value")
+            if x.get("Id") in ("X", "Z") and v is not None:
+                vals[d.get("Id")] = float(v.text) * 1e6
+        return vals.get("X"), vals.get("Z")
+    except Exception:
+        return None, None
+
+def otsu_mask_nofilter(combined):
+        if combined.max() == 0:
+            return np.zeros(combined.shape, dtype=bool)
+        t = threshold_otsu(combined)
+        mask = combined > t
+        mask = remove_small_objects(mask, max_size=50)  # remove noise pixels
+        mask = closing(mask, disk(5))
+        return binary_fill_holes(mask)
+
+
 def gen_mask(fitc, hoechst, tritc):
     combined = np.maximum(fitc, np.maximum(hoechst, tritc))
     if combined.max() == 0:
@@ -222,7 +246,7 @@ val_dataset = SpheroidDataSet(valSL, valMA)
 val_loader = DataLoader(val_dataset, batch_size= 8, shuffle= False)
 
 
-MODE = "view"  # "train", "test", "checkbest", "view", "view_dice", "augcheck "
+MODE = "orthoview"  # "train", "test", "checkbest", "view", "view_dice", "augcheck "
 
 print(datetime.now())
 
@@ -296,9 +320,53 @@ if MODE == "train":
     with open("Time_Log.txt", "a") as f:
             print("-" * 60, file=f)
 
+if MODE == "orthoview":
+    STACK = "127_Scan.czi"
+    BAND = (86, 95)
+    Y_ROW = None
+    arr = czifile.CziFile(STACK).asarray()
+    vol = np.maximum(arr[0], np.maximum(arr[1], arr[2]))
+
+    otsu = np.stack([otsu_mask_nofilter(vol[z]) for z in range(vol.shape[0])])
+
+    sd = torch.load("best_model.pth", map_location=device)
+    model.load_state_dict(sd["model"] if "model" in sd else sd)
+    model.eval()
+    prediction = np.zeros(vol.shape, dtype = bool)
+    with torch.no_grad():
+        for z0 in range(0, vol.shape[0], 8):
+            x = torch.tensor(vol[z0:z0 + 8] / 255, dtype = torch.float32).unsqueeze(1).to(device)
+            prediction[z0:z0 + 8] = (torch.sigmoid(model(x)) > 0.5).squeeze(1).cpu().numpy()
+
+    if Y_ROW is None:
+        Y_ROW = int(np.argwhere(prediction)[:, 1].mean())
+
+    xy_um, z_um = czi_scalingUm(STACK)
+    aspect = z_um / xy_um if (xy_um and z_um) else 1.0
+    print(f"y = {Y_ROW}, pixel = {xy_um} um, z-step = {z_um} um, aspect = {aspect:.2f}")
+
+    raw_xz = vol[:,Y_ROW,:]
+    vmax = np.percentile(raw_xz, 99.5)
+    panels = [("Raw", None), ("Otsu", otsu[:, Y_ROW, :]) , ("Model", prediction[:, Y_ROW, :])]
+
+    fig, axes = plt.subplots(1,3, figsize = (15,5), sharey= True)
+    for ax, (title, m) in zip(axes, panels):
+        ax.imshow(raw_xz, cmap = "gray", vmax = vmax, aspect = aspect)
+        if m is not None:
+            ax.contour(m, levels = [0.5], colors = "yellow", linewidths = 0.8)
+            ax.imshow(np.ma.masked_where(~m, m.astype(float)), cmap = "autumn", alpha = 0.4, aspect = aspect)
+        if BAND:
+            ax.axhspan(BAND[0] - 0.5, BAND[1] + 0.5, color = "gray", alpha = 0.12)
+        ax.set_title(title)
+        ax.set_xlabel("x (pixels)")
+    axes[0].set_ylabel("z-slice")
+    fig.suptitle(f"{STACK}: xz cross-section at y = {Y_ROW}")
+    plt.tight_layout()
+    plt.savefig(f"ortho_{STACK.replace('.czi', '')}_y{Y_ROW}.png", dpi= 150)
+    plt.close()
 
 
-elif MODE == "test":
+if MODE == "test":
     model.load_state_dict(torch.load('best_model.pth', map_location= device))
     model.eval()
 
