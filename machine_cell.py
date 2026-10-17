@@ -321,8 +321,8 @@ if MODE == "train":
             print("-" * 60, file=f)
 
 if MODE == "orthoview":
-    STACK = "127_Scan.czi"
-    BAND = (86, 95)
+    STACK = "107_Scan.czi"
+    BAND = (58,106)
     Y_ROW = None
     arr = czifile.CziFile(STACK).asarray()
     vol = np.maximum(arr[0], np.maximum(arr[1], arr[2]))
@@ -349,14 +349,14 @@ if MODE == "orthoview":
     vmax = np.percentile(raw_xz, 99.5)
     panels = [("Raw", None), ("Otsu", otsu[:, Y_ROW, :]) , ("Model", prediction[:, Y_ROW, :])]
 
-    fig, axes = plt.subplots(1,3, figsize = (15,5), sharey= True)
+    fig, axes = plt.subplots(1,3, figsize = (15,3), sharey= True)
     for ax, (title, m) in zip(axes, panels):
         ax.imshow(raw_xz, cmap = "gray", vmax = vmax, aspect = aspect)
         if m is not None:
             ax.contour(m, levels = [0.5], colors = "yellow", linewidths = 0.8)
             ax.imshow(np.ma.masked_where(~m, m.astype(float)), cmap = "autumn", alpha = 0.4, aspect = aspect)
         if BAND:
-            ax.axhspan(BAND[0] - 0.5, BAND[1] + 0.5, color = "gray", alpha = 0.12)
+            ax.axhspan(BAND[0] - 0.5, BAND[1] + 0.5, color = "gray", alpha = 0.25)
         ax.set_title(title)
         ax.set_xlabel("x (pixels)")
     axes[0].set_ylabel("z-slice")
