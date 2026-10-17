@@ -31,17 +31,18 @@ def count_cells(ch_slice):
 
 def czi_scalingUm(path):
     import xml.etree.ElementTree as ET
+    md= czifile.CziFile(path).metadata
+    md = md() if callable(md) else md
+    root = ET.fromstring(md) if isinstance(md, str) else md
 
-    try:
-        root = ET.fromstringlist(czifile.CziFile(path).metadata())
-        vals = {}
-        for x in root.iter("Distance"):
-            v = x.find("Value")
-            if x.get("Id") in ("X", "Z") and v is not None:
-                vals[d.get("Id")] = float(v.text) * 1e6
-        return vals.get("X"), vals.get("Z")
-    except Exception:
-        return None, None
+    vals = {}
+    for d in root.iter():
+        if str(d.tag).endswith("Distance") and x.get("Id") in ("X", "Z"):
+            for v in x:
+                if str(v.tag).endswith("Value") and v.text:
+                    vals[d.get["Id"]] = float(v.text) * 1e6
+    print("Scaling found: ", vals)
+    return vals.get("X"), vals.get("Z")
 
 def otsu_mask_nofilter(combined):
         if combined.max() == 0:
@@ -349,7 +350,7 @@ if MODE == "orthoview":
     vmax = np.percentile(raw_xz, 99.5)
     panels = [("Raw", None), ("Otsu", otsu[:, Y_ROW, :]) , ("Model", prediction[:, Y_ROW, :])]
 
-    fig, axes = plt.subplots(1,3, figsize = (15,3), sharey= True)
+    fig, axes = plt.subplots(1,3, figsize = (15,1), sharey= True)
     for ax, (title, m) in zip(axes, panels):
         ax.imshow(raw_xz, cmap = "gray", vmax = vmax, aspect = aspect)
         if m is not None:
