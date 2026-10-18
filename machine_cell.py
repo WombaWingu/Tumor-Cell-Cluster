@@ -16,6 +16,11 @@ from datetime import datetime, date
 # Load CZI file
 CZI_PATH = ["111_Scan.czi","59_Scan.czi","35_Scan.czi","107_Scan.czi","81_Scan.czi","127_Scan.czi","74_Scan.czi"]
 
+
+SPLIT = {"111_Scan.czi": "train", "59_Scan.czi": "train", "35_Scan.czi": "train",
+         "107_Scan.czi": "val", "81_Scan.czi": "val",
+         "127_Scan.czi": "test", "74_Scan.czi": "test"}
+
 print(datetime.now())
 
 # Cell counting per slice 
@@ -31,17 +36,17 @@ def count_cells(ch_slice):
 
 def czi_scalingUm(path):
     import xml.etree.ElementTree as ET
-    md= czifile.CziFile(path).metadata
-    md = md() if callable(md) else md
+    md = czifile.CziFile(path).metadata
+    md = md() if callable(md) else md          # method in new czifile, attribute in old
     root = ET.fromstring(md) if isinstance(md, str) else md
 
     vals = {}
     for d in root.iter():
-        if str(d.tag).endswith("Distance") and x.get("Id") in ("X", "Z"):
-            for v in x:
+        if str(d.tag).endswith("Distance") and d.get("Id") in ("X", "Z"):
+            for v in d:
                 if str(v.tag).endswith("Value") and v.text:
-                    vals[d.get["Id"]] = float(v.text) * 1e6
-    print("Scaling found: ", vals)
+                    vals[d.get("Id")] = float(v.text) * 1e6   # meters -> microns
+    print("Scaling found:", vals)
     return vals.get("X"), vals.get("Z")
 
 def otsu_mask_nofilter(combined):
@@ -52,6 +57,78 @@ def otsu_mask_nofilter(combined):
         mask = remove_small_objects(mask, max_size=50)  # remove noise pixels
         mask = closing(mask, disk(5))
         return binary_fill_holes(mask)
+
+def predict_volume(vol):
+    prediction = np.zeros(vol.shape, dtype=bool)
+    with torch.no_grad():
+        for z0 in range(0, vol.shape[0], 8):
+            x = torch.tensor(vol[z0:z0 + 8] / 255, dtype=torch.float32).unsqueeze(1).to(device)
+            prediction[z0:z0 + 8] = (torch.sigmoid(model(x)) > 0.5).squeeze(1).cpu().numpy()
+    return prediction
+
+def ortho_figure(stack, y_row = None, margin = 30):
+    arr = czifile.CziFile(stack).asarray()
+    vol = np.maximum(arr[0], np.maximum(arr[1], arr[2]))
+    otsu = np.stack([otsu_mask_nofilter(s) for s in vol])
+    prediction = predict_volume(vol)
+    nz = vol.shape[0]
+
+    if y_row is None:
+        y_row = int(np.argwhere(prediction)[:, 1].mean())
+
+        cols = np.where((otsu[:, y_row, :] | prediction[:, y_row, :]).any(axis= 0))[0]
+        X0, X1 = (0, vol.shape[2]) if len(cols) == 0 else \
+            (max(cols.min() - margin, 0), min(cols.max() + margin, vol.shape[2]))
+
+        cov = otsu.mean(axis=(1,2))
+        cliff = int(np.argmax(cov[:-1] - cov[1:])) + 1
+        drop = cov[cliff - 1] - cov[cliff]
+
+        raw_xz = vol[:, y_row, :]
+        vmax = np.percentile(raw_xz, 99.5)
+        panels = [("Raw", None), ("Otsu", otsu[:, y_row, :]) , ("Model", prediction[:, y_row, :])]
+        ASPECT = 4
+        h = 1.5 + 4.5 * vol.shape[0] * ASPECT / (X1 - X0)
+        fig, axes = plt.subplots(1,3, figsize = (15,8), sharey= True)
+        for i, (ax, (title, m)) in enumerate (zip(axes, panels)):
+            ax.imshow(raw_xz, cmap = "gray", vmax = vmax, aspect = ASPECT)
+            if m is not None:
+                ax.contour(m, levels = [0.5], colors = "yellow", linewidths = 0.8)
+                ax.imshow(np.ma.masked_where(~m, m.astype(float)), cmap = "autumn", alpha = 0.4, aspect = ASPECT)
+            ax.set_title(title)
+            ax.set_xlabel("x (pixels)")
+            ax.set_xlim(X0, X1)
+            ax.set_ylim(nz - 0.5, - 0.5)
+            if i == 0:
+                ax.set_ylabel(f"z-slice (z streched {ASPECT}x)")
+            else:
+                ax.set_yticklabels([])
+        fig.suptitle(f"{stack} [{SPLIT[stack]}] y = {y_row}  " 
+                     f"largest Otsu drop: z = {cliff} ({drop:.3f} coverage)")
+        plt.tight_layout()
+        out = f"ortho{SPLIT[stack]}_{stack.replace(".czi", '')}.png"
+        plt.savefig(out, dpi=150)
+        plt.close()
+        print(f"{out}: y = {y_row}, cliff z = {cliff}, drop= {drop:.3f}")
+
+def hard_dice(predictions, masks):
+    hard = (predictions > 0.5).float()
+    intersec = (hard * masks).sum(dim = (1,2,3))
+    denom = hard.sum(dim = (1,2,3)) + masks.sum(dim = (1,2,3))
+    d = (2 * intersec + 1e-6) / (denom + 1e-6)
+    return d.cpu().tolist()
+
+def stack_dice(stack):
+    loader = DataLoader(SpheroidDataSet(stack_slice[stack], stack_mask[stack]))
+
+    dice = []
+    with torch.no_grad():
+            for images, masks in loader:
+                images = images.float().unsqueeze(1).to(device)
+                masks = masks.float().unsqueeze(1).to(device)
+                dice.extend(hard_dice(torch.sigmoid(model(images)), masks))
+    return np.array(dice)
+
 
 
 def gen_mask(fitc, hoechst, tritc):
@@ -246,8 +323,7 @@ dataloader = DataLoader(dataset=dataset, batch_size= 8, shuffle=False)
 val_dataset = SpheroidDataSet(valSL, valMA)
 val_loader = DataLoader(val_dataset, batch_size= 8, shuffle= False)
 
-
-MODE = "orthoview"  # "train", "test", "checkbest", "view", "view_dice", "augcheck "
+MODE = "orthoall"  # "train", "test", "checkbest", "view", "view_dice", "augcheck "
 
 print(datetime.now())
 
@@ -322,8 +398,8 @@ if MODE == "train":
             print("-" * 60, file=f)
 
 if MODE == "orthoview":
-    STACK = "107_Scan.czi"
-    BAND = (58,106)
+    STACK = "127_Scan.czi"
+    BAND = (86,125)
     Y_ROW = None
     arr = czifile.CziFile(STACK).asarray()
     vol = np.maximum(arr[0], np.maximum(arr[1], arr[2]))
@@ -349,13 +425,16 @@ if MODE == "orthoview":
     raw_xz = vol[:,Y_ROW,:]
     vmax = np.percentile(raw_xz, 99.5)
     panels = [("Raw", None), ("Otsu", otsu[:, Y_ROW, :]) , ("Model", prediction[:, Y_ROW, :])]
+    ASPECT = 4
+    X0, X1 = 60, 470
 
-    fig, axes = plt.subplots(1,3, figsize = (15,1), sharey= True)
+    h = 1.5 + 4.5 * vol.shape[0] * ASPECT / (X1 - X0)
+    fig, axes = plt.subplots(1,3, figsize = (15,8), sharey= True)
     for ax, (title, m) in zip(axes, panels):
-        ax.imshow(raw_xz, cmap = "gray", vmax = vmax, aspect = aspect)
+        ax.imshow(raw_xz, cmap = "gray", vmax = vmax, aspect = ASPECT)
         if m is not None:
             ax.contour(m, levels = [0.5], colors = "yellow", linewidths = 0.8)
-            ax.imshow(np.ma.masked_where(~m, m.astype(float)), cmap = "autumn", alpha = 0.4, aspect = aspect)
+            ax.imshow(np.ma.masked_where(~m, m.astype(float)), cmap = "autumn", alpha = 0.4, aspect = ASPECT)
         if BAND:
             ax.axhspan(BAND[0] - 0.5, BAND[1] + 0.5, color = "gray", alpha = 0.25)
         ax.set_title(title)
@@ -366,6 +445,33 @@ if MODE == "orthoview":
     plt.savefig(f"ortho_{STACK.replace('.czi', '')}_y{Y_ROW}.png", dpi= 150)
     plt.close()
 
+if MODE == "diceplot":
+    STACKS = ["111_Scan.czi", "59_Scan.czi", "35_Scan.czi"]    # any mix of stacks
+
+    sd = torch.load("best_model.pth", map_location=device)
+    model.load_state_dict(sd["model"] if "model" in sd else sd)
+    model.eval()
+
+    fig, axes = plt.subplots(len(STACKS), 1, figsize=(10, 3.5 * len(STACKS)), squeeze=False)
+    for ax, s in zip(axes[:, 0], STACKS):
+        d = stack_dice(s)
+        z = stack_z[s]
+        cov = [m.mean() for m in stack_mask[s]]
+
+        ax.plot(z, d, "o-", ms=3, color="tab:blue")
+        ax.set_ylim(0, 1.02)
+        ax.set_ylabel("Dice", color="tab:blue")
+        ax.set_xlabel("z-slice")
+        ax.set_title(f"{s} [{SPLIT[s]}]  mean {d.mean():.3f}, median {np.median(d):.3f}")
+
+        ax2 = ax.twinx()
+        ax2.plot(z, cov, color="gray", alpha=0.5)
+        ax2.set_ylabel("Mask coverage", color="gray")
+
+    plt.tight_layout()
+    name = "_".join(s.split("_")[0] for s in STACKS)
+    plt.savefig(f"dice_by_slice_{name}.png", dpi=150)
+    plt.close()
 
 if MODE == "test":
     model.load_state_dict(torch.load('best_model.pth', map_location= device))
@@ -418,6 +524,13 @@ if MODE == "checkbest":
 
 torch.save(model.state_dict(), "model.pth")
 
+if MODE == "orthoall":
+    sd = torch.load("best_model.pth", map_location=device)
+    model.load_state_dict(sd["model"] if "model" in sd else sd)
+    model.eval()
+    for s in CZI_PATH:
+        ortho_figure(s)
+
 if MODE == "augcheck":
     check_dataset = SpheroidDataSet(trainSL, trainMA, augment=True)
     for i in range(5):
@@ -455,7 +568,7 @@ if MODE == "view":
 
 if MODE == "view_dice":
     val_dice = np.load("test_dice.npy")
-    val_stacks = ["127_Scan.czi", "74_Scan.czi"]
+    val_stacks = ["35_Scan.czi", "59_Scan.czi"]
     print(len(np.load("test_dice.npy")))
     plt.savefig("test_dice_by_slice.png", dpi=150)
 
