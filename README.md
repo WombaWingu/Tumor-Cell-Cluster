@@ -1,5 +1,19 @@
 ﻿# Tumor-Cell-Cluster
 
+## Method
+
+No expert annotations exist for this data, so labels are generated
+programmatically: per-slice Otsu threshold, small-object removal,
+morphological closing, hole filling. The U-Net is trained to reproduce
+these weak labels.
+
+- Architecture: 2D U-Net, single input channel, single output channel
+- Loss: Dice + binary cross-entropy, to handle heavy class imbalance
+  (foreground is roughly 4 to 25 percent of a slice)
+- Split: **by stack, not by slice.** 3 train / 2 val / 2 test. Adjacent
+  slices in a stack are near-duplicates, so a random slice-level split
+  would leak training data into the test set and inflate the score.
+
 ## Label quality audit
 
 Masks come from per-slice Otsu thresholding, not expert annotation. Each
