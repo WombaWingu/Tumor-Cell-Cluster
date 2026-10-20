@@ -6,7 +6,7 @@ Masks come from per-slice Otsu thresholding, not expert annotation. Each
 z-slice gets its own threshold estimated from its own histogram, so the
 labels are only as stable as that estimate.
 
-![xz cross-section, 107_Scan](figures/xz_107.png)
+![xz cross-section, 107_Scan](orthoval_107_Scan.png)
 *Orthogonal (xz) view through 107_Scan. Otsu produces razor-straight
 horizontal edges spanning ~180 px; the model's boundary is smooth.*
 
@@ -20,7 +20,7 @@ the four with the largest single-slice coverage drops. The three stacks
 with the smallest drops (35, 74, 81) show no bars and near-identical
 Otsu/model masks.
 
-![xz cross-section, 35_Scan](figures/xz_35.png)
+![xz cross-section, 35_Scan](orthotrain_35_Scan.png)
 *35_Scan, smallest Otsu drop (0.005). Both masks agree closely.*
 
 
